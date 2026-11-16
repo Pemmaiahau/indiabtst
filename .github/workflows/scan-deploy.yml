@@ -1,0 +1,57 @@
+# Scans the market on a schedule, builds the static site and publishes it to Cloudflare Pages (free plan).
+#
+# One-time setup:
+#   1. Cloudflare dashboard -> Workers & Pages -> Create -> Pages -> "Direct upload" project named  btst-india
+#      (or change PROJECT below).
+#   2. Cloudflare -> My Profile -> API Tokens -> Create Token -> template "Edit Cloudflare Workers"
+#      (it includes Cloudflare Pages: Edit).
+#   3. GitHub repo -> Settings -> Secrets and variables -> Actions -> add
+#        CLOUDFLARE_API_TOKEN   (the token)
+#        CLOUDFLARE_ACCOUNT_ID  (Cloudflare dashboard -> Workers & Pages -> Account ID)
+name: Scan and deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    # GitHub cron is UTC and often starts 5-20 minutes late. India time = UTC + 5:30.
+    - cron: "15 3 * * 1-5" # 8:45 AM IST  before the open: overnight US close, Asia, crude
+    - cron: "20 9 * * 1-5" # 2:50 PM IST  for the 3:20 PM BTST decision
+    - cron: "20 10 * * 1-5" # 3:50 PM IST  final prices, swing signals
+    - cron: "45 13 * * 1-5" # 7:15 PM IST  NSE futures/options and FII files are usually out
+    - cron: "30 16 * * 1-5" # 10:00 PM IST  retry for late NSE files
+
+env:
+  PROJECT: btst-india
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # ./cache holds parsed NSE files. The copy committed in the repo is the starting point;
+      # this restores a newer copy saved by earlier runs so each day is downloaded only once.
+      - uses: actions/cache@v4
+        with:
+          path: cache
+          key: nse-${{ github.run_id }}
+          restore-keys: nse-
+      - run: npm ci
+      - run: npm run scan
+      - run: npm run check
+      - run: npm run build
+      - run: npx wrangler@4 pages deploy out --project-name "$PROJECT" --branch main --commit-dirty=true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
